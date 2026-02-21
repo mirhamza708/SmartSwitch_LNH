@@ -1,0 +1,1 @@
+This app is for the smart switch device from LNH Corporation.
