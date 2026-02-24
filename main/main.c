@@ -53,13 +53,38 @@ static EventGroupHandle_t s_wifi_event_group;
 // --- WEB SERVER LOGIC START ---
 
 /* Simple HTML page with a button */
-const char* html_page = 
-"<html><head><title>ESP32 Controller</title></head>"
-"<body><h1>ESP32 Web Server</h1>"
-"<p>Status LED Control:</p>"
-"<button onclick=\"fetch('/toggle')\">TOGGLE LED</button>"
-"</body></html>";
+// const char* html_page = 
+// "<html><head><title>ESPgui32 Controller</title></head>"
+// "<body><h1>ESP32 Web Server</h1>"
+// "<p>Status LED Control:</p>"
+// "<button onclick=\"fetch('/toggle')\">TOGGLE LED</button>"
+// "</body></html>";
 
+// html with CSS
+const char* html_page = 
+"<!DOCTYPE html><html><head>"
+"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+"<style>"
+"  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); "
+"         color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }"
+"  .card { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); padding: 30px; border-radius: 20px; "
+"          box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); border: 1px solid rgba(255, 255, 255, 0.18); text-align: center; }"
+"  h1 { margin-bottom: 10px; font-weight: 300; }"
+"  .status { font-size: 0.9em; opacity: 0.8; margin-bottom: 25px; }"
+"  .btn { background: #00d2ff; background: -webkit-linear-gradient(to right, #3a7bd5, #00d2ff); "
+"         linear-gradient(to right, #3a7bd5, #00d2ff); border: none; color: white; padding: 15px 40px; "
+"         font-size: 1.2em; border-radius: 50px; cursor: pointer; transition: 0.3s; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }"
+"  .btn:active { transform: scale(0.95); }"
+"  .footer { margin-top: 20px; font-size: 0.7em; opacity: 0.5; }"
+"</style></head>"
+"<body>"
+"  <div class='card'>"
+"    <h1>SmartSwitch</h1>"
+"    <p class='status'>Device: ESP32-LNH</p>"
+"    <button class='btn' onclick=\"fetch('/toggle')\">POWER ON/OFF</button>"
+"    <div class='footer'>Connected via Local Access Point</div>"
+"  </div>"
+"</body></html>";
 /* Handler for the Main Page (/) */
 esp_err_t get_handler(httpd_req_t *req) {
     httpd_resp_send(req, html_page, HTTPD_RESP_USE_STRLEN);
