@@ -22,6 +22,9 @@
 #include "lwip/sys.h"
 #include "driver/gpio.h"
 #include "hardware_definitions.h"
+#include "esp_spiffs.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
@@ -78,44 +81,23 @@ static int s_retry_num = 0;
 /* FreeRTOS event group to signal when we are connected/disconnected */
 static EventGroupHandle_t s_wifi_event_group;
 
-// --- WEB SERVER LOGIC START ---
+esp_err_t get_handler(httpd_req_t *req)
+{
+    FILE* f = fopen("/spiffs/index.html", "r");
+    if (!f) {
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
 
-/* Simple HTML page with a button */
-// const char* html_page = 
-// "<html><head><title>ESPgui32 Controller</title></head>"
-// "<body><h1>ESP32 Web Server</h1>"
-// "<p>Status LED Control:</p>"
-// "<button onclick=\"fetch('/toggle')\">TOGGLE LED</button>"
-// "</body></html>";
+    char buffer[1024];
+    size_t read_bytes;
 
-// html with CSS
-const char* html_page = 
-"<!DOCTYPE html><html><head>"
-"<meta name='viewport' content='width=device-width, initial-scale=1'>"
-"<style>"
-"  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); "
-"         color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }"
-"  .card { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); padding: 30px; border-radius: 20px; "
-"          box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); border: 1px solid rgba(255, 255, 255, 0.18); text-align: center; }"
-"  h1 { margin-bottom: 10px; font-weight: 300; }"
-"  .status { font-size: 0.9em; opacity: 0.8; margin-bottom: 25px; }"
-"  .btn { background: #00d2ff; background: -webkit-linear-gradient(to right, #3a7bd5, #00d2ff); "
-"         linear-gradient(to right, #3a7bd5, #00d2ff); border: none; color: white; padding: 15px 40px; "
-"         font-size: 1.2em; border-radius: 50px; cursor: pointer; transition: 0.3s; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }"
-"  .btn:active { transform: scale(0.95); }"
-"  .footer { margin-top: 20px; font-size: 0.7em; opacity: 0.5; }"
-"</style></head>"
-"<body>"
-"  <div class='card'>"
-"    <h1>SmartSwitch</h1>"
-"    <p class='status'>Device: ESP32-LNH</p>"
-"    <button class='btn' onclick=\"fetch('/toggle')\">POWER ON/OFF</button>"
-"    <div class='footer'>Connected via Local Access Point</div>"
-"  </div>"
-"</body></html>";
-/* Handler for the Main Page (/) */
-esp_err_t get_handler(httpd_req_t *req) {
-    httpd_resp_send(req, html_page, HTTPD_RESP_USE_STRLEN);
+    while ((read_bytes = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+        httpd_resp_send_chunk(req, buffer, read_bytes);
+    }
+
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);  // End response
     return ESP_OK;
 }
 
@@ -129,6 +111,119 @@ esp_err_t toggle_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+esp_err_t ota_post_handler(httpd_req_t *req)
+{
+    esp_ota_handle_t ota_handle;
+    const esp_partition_t *ota_partition =
+        esp_ota_get_next_update_partition(NULL);
+
+    if (!ota_partition) {
+        httpd_resp_sendstr(req, "No OTA partition found");
+        return ESP_FAIL;
+    }
+
+    if (esp_ota_begin(ota_partition, OTA_SIZE_UNKNOWN, &ota_handle) != ESP_OK) {
+        httpd_resp_sendstr(req, "OTA Begin Failed");
+        return ESP_FAIL;
+    }
+
+    char buffer[1024];
+    int remaining = req->content_len;
+
+    while (remaining > 0) {
+        int recv_len = httpd_req_recv(
+            req,
+            buffer,
+            remaining > sizeof(buffer) ? sizeof(buffer) : remaining
+        );
+
+        if (recv_len <= 0) {
+            esp_ota_end(ota_handle);
+            return ESP_FAIL;
+        }
+
+        if (esp_ota_write(ota_handle, buffer, recv_len) != ESP_OK) {
+            esp_ota_end(ota_handle);
+            return ESP_FAIL;
+        }
+
+        remaining -= recv_len;
+    }
+
+    if (esp_ota_end(ota_handle) != ESP_OK) {
+        httpd_resp_sendstr(req, "OTA End Failed");
+        return ESP_FAIL;
+    }
+
+    if (esp_ota_set_boot_partition(ota_partition) != ESP_OK) {
+        httpd_resp_sendstr(req, "Set Boot Partition Failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_sendstr(req, "Firmware updated! Rebooting...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+esp_err_t spiffs_post_handler(httpd_req_t *req)
+{
+    const esp_partition_t *spiffs_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                 ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+                                 NULL);
+
+    if (!spiffs_partition) {
+        httpd_resp_sendstr(req, "SPIFFS partition not found");
+        return ESP_FAIL;
+    }
+
+    // Unmount SPIFFS before writing
+    esp_vfs_spiffs_unregister(NULL);
+
+    // Erase entire partition
+    if (esp_partition_erase_range(spiffs_partition, 0,
+                                   spiffs_partition->size) != ESP_OK) {
+        httpd_resp_sendstr(req, "SPIFFS erase failed");
+        return ESP_FAIL;
+    }
+
+    char buffer[1024];
+    int remaining = req->content_len;
+    int offset = 0;
+
+    while (remaining > 0) {
+        int recv_len = httpd_req_recv(
+            req,
+            buffer,
+            remaining > sizeof(buffer) ? sizeof(buffer) : remaining
+        );
+
+        if (recv_len <= 0) {
+            return ESP_FAIL;
+        }
+
+        if (esp_partition_write(spiffs_partition,
+                                offset,
+                                buffer,
+                                recv_len) != ESP_OK) {
+            httpd_resp_sendstr(req, "SPIFFS write failed");
+            return ESP_FAIL;
+        }
+
+        offset += recv_len;
+        remaining -= recv_len;
+    }
+
+    httpd_resp_sendstr(req, "SPIFFS updated! Rebooting...");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
 /* Start the Web Server */
 void start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -137,12 +232,16 @@ void start_webserver(void) {
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_uri_t uri_root = {.uri = "/", .method = HTTP_GET, .handler = get_handler};
         httpd_uri_t uri_toggle = {.uri = "/toggle", .method = HTTP_GET, .handler = toggle_handler};
+        httpd_uri_t ota_uri = {.uri = "/update", .method    = HTTP_POST, .handler   = ota_post_handler, .user_ctx  = NULL};
+        httpd_uri_t spiffs_uri = {.uri = "/update_spiffs", .method = HTTP_POST, .handler = spiffs_post_handler, .user_ctx  = NULL};
+
+        httpd_register_uri_handler(server, &spiffs_uri);
+        httpd_register_uri_handler(server, &ota_uri);
         httpd_register_uri_handler(server, &uri_root);
         httpd_register_uri_handler(server, &uri_toggle);
         ESP_LOGI("SERVER", "Web server started!");
     }
 }
-// --- WEB SERVER LOGIC END ---
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -165,7 +264,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
-
 
 /* Initialize soft AP */
 esp_netif_t *wifi_init_softap(void)
@@ -288,9 +386,38 @@ void configure_gpios(void)
     gpio_dump_io_configuration(stdout, SOC_GPIO_VALID_GPIO_MASK);
 }
 
+void init_spiffs(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE("SPIFFS", "Mount failed");
+    } else {
+        ESP_LOGI("SPIFFS", "Mounted successfully");
+    }
+}
+
 void app_main(void) {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
+
+    configure_gpios(); // Initialize the LED pin
+
+    init_spiffs(); // mount spiffs
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -299,7 +426,8 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    configure_gpios(); // Initialize the LED pin
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
@@ -337,4 +465,9 @@ void app_main(void) {
 
     // Enable NAPT for the hotspot
     esp_netif_napt_enable(esp_netif_ap);
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
