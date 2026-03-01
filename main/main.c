@@ -81,6 +81,21 @@ static int s_retry_num = 0;
 /* FreeRTOS event group to signal when we are connected/disconnected */
 static EventGroupHandle_t s_wifi_event_group;
 
+static TaskHandle_t led_task_handle = NULL;
+static QueueHandle_t led_queue;
+
+typedef enum {
+    LED_MODE_OFF,
+    LED_MODE_ON,
+    LED_MODE_BLINK
+} led_mode_t;
+
+typedef struct {
+    led_mode_t mode;
+    uint32_t on_time_ms;
+    uint32_t off_time_ms;
+} led_cmd_t;
+
 esp_err_t get_handler(httpd_req_t *req)
 {
     FILE* f = fopen("/spiffs/index.html", "r");
@@ -111,26 +126,83 @@ esp_err_t toggle_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+void led_task(void *arg)
+{
+    led_cmd_t current_cmd = {
+        .mode = LED_MODE_OFF,
+        .on_time_ms = 0,
+        .off_time_ms = 0
+    };
+    gpio_set_level(STATUS_LED_PIN, 0);
+
+    while (1) {
+
+        // Check if new command arrived (non-blocking)
+        led_cmd_t new_cmd;
+        if (xQueueReceive(led_queue, &new_cmd, pdMS_TO_TICKS(5)) == pdTRUE) {
+            ESP_LOGI("LEDTASK", "CMD %d", new_cmd.mode);
+            current_cmd = new_cmd;
+        }
+
+        switch (current_cmd.mode) {
+
+            case LED_MODE_OFF:
+                gpio_set_level(STATUS_LED_PIN, 0);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                break;
+
+            case LED_MODE_ON:
+                gpio_set_level(STATUS_LED_PIN, 1);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                break;
+
+            case LED_MODE_BLINK:
+                gpio_set_level(STATUS_LED_PIN, 1);
+                vTaskDelay(pdMS_TO_TICKS(current_cmd.on_time_ms));
+
+                gpio_set_level(STATUS_LED_PIN, 0);
+                vTaskDelay(pdMS_TO_TICKS(current_cmd.off_time_ms));
+                break;
+        }
+    }
+}
+
 esp_err_t ota_post_handler(httpd_req_t *req)
 {
-    esp_ota_handle_t ota_handle;
+    esp_err_t ret = ESP_OK;
+    esp_ota_handle_t ota_handle = 0;
+    bool ota_started = false;
+
+    // Start upload blink
+    led_cmd_t upload_blink = {
+        .mode = LED_MODE_BLINK,
+        .on_time_ms = 100,
+        .off_time_ms = 100
+    };
+    xQueueSend(led_queue, &upload_blink, pdMS_TO_TICKS(10));
+
     const esp_partition_t *ota_partition =
         esp_ota_get_next_update_partition(NULL);
 
     if (!ota_partition) {
         httpd_resp_sendstr(req, "No OTA partition found");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
 
     if (esp_ota_begin(ota_partition, OTA_SIZE_UNKNOWN, &ota_handle) != ESP_OK) {
         httpd_resp_sendstr(req, "OTA Begin Failed");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
+
+    ota_started = true;
 
     char buffer[1024];
     int remaining = req->content_len;
 
     while (remaining > 0) {
+
         int recv_len = httpd_req_recv(
             req,
             buffer,
@@ -138,13 +210,13 @@ esp_err_t ota_post_handler(httpd_req_t *req)
         );
 
         if (recv_len <= 0) {
-            esp_ota_end(ota_handle);
-            return ESP_FAIL;
+            ret = ESP_FAIL;
+            goto cleanup;
         }
 
         if (esp_ota_write(ota_handle, buffer, recv_len) != ESP_OK) {
-            esp_ota_end(ota_handle);
-            return ESP_FAIL;
+            ret = ESP_FAIL;
+            goto cleanup;
         }
 
         remaining -= recv_len;
@@ -152,23 +224,60 @@ esp_err_t ota_post_handler(httpd_req_t *req)
 
     if (esp_ota_end(ota_handle) != ESP_OK) {
         httpd_resp_sendstr(req, "OTA End Failed");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
+
+    ota_started = false;  // Already ended successfully
 
     if (esp_ota_set_boot_partition(ota_partition) != ESP_OK) {
         httpd_resp_sendstr(req, "Set Boot Partition Failed");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
 
     httpd_resp_sendstr(req, "Firmware updated! Rebooting...");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
 
-    return ESP_OK;
+cleanup:
+
+    if (ret == ESP_OK) {
+
+        // Stop blinking before reboot
+        led_cmd_t led_off = { .mode = LED_MODE_OFF };
+        xQueueSend(led_queue, &led_off, pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+
+    } else {
+
+        // If OTA started but failed, abort properly
+        if (ota_started) {
+            esp_ota_end(ota_handle);
+        }
+
+        // Error blink pattern (slow blink)
+        led_cmd_t error_blink = {
+            .mode = LED_MODE_BLINK,
+            .on_time_ms = 500,
+            .off_time_ms = 500
+        };
+        xQueueSend(led_queue, &error_blink, pdMS_TO_TICKS(10));
+    }
+
+    return ret;
 }
 
 esp_err_t spiffs_post_handler(httpd_req_t *req)
 {
+    esp_err_t ret = ESP_OK;
+
+    led_cmd_t upload_blink = {
+        .mode = LED_MODE_BLINK,
+        .on_time_ms = 100,
+        .off_time_ms = 100
+    };
+    xQueueSend(led_queue, &upload_blink, pdMS_TO_TICKS(10));
+
     const esp_partition_t *spiffs_partition =
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
                                  ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
@@ -176,17 +285,17 @@ esp_err_t spiffs_post_handler(httpd_req_t *req)
 
     if (!spiffs_partition) {
         httpd_resp_sendstr(req, "SPIFFS partition not found");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
 
-    // Unmount SPIFFS before writing
     esp_vfs_spiffs_unregister(NULL);
 
-    // Erase entire partition
     if (esp_partition_erase_range(spiffs_partition, 0,
-                                   spiffs_partition->size) != ESP_OK) {
+                                  spiffs_partition->size) != ESP_OK) {
         httpd_resp_sendstr(req, "SPIFFS erase failed");
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto cleanup;
     }
 
     char buffer[1024];
@@ -194,6 +303,7 @@ esp_err_t spiffs_post_handler(httpd_req_t *req)
     int offset = 0;
 
     while (remaining > 0) {
+
         int recv_len = httpd_req_recv(
             req,
             buffer,
@@ -201,7 +311,8 @@ esp_err_t spiffs_post_handler(httpd_req_t *req)
         );
 
         if (recv_len <= 0) {
-            return ESP_FAIL;
+            ret = ESP_FAIL;
+            goto cleanup;
         }
 
         if (esp_partition_write(spiffs_partition,
@@ -209,7 +320,8 @@ esp_err_t spiffs_post_handler(httpd_req_t *req)
                                 buffer,
                                 recv_len) != ESP_OK) {
             httpd_resp_sendstr(req, "SPIFFS write failed");
-            return ESP_FAIL;
+            ret = ESP_FAIL;
+            goto cleanup;
         }
 
         offset += recv_len;
@@ -218,10 +330,33 @@ esp_err_t spiffs_post_handler(httpd_req_t *req)
 
     httpd_resp_sendstr(req, "SPIFFS updated! Rebooting...");
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
+cleanup:
 
-    return ESP_OK;
+    if (ret == ESP_OK) {
+        led_cmd_t led_off = { .mode = LED_MODE_OFF };
+        xQueueSend(led_queue, &led_off, pdMS_TO_TICKS(10));
+        ESP_LOGI("SERVER", "SPIFFS updated successfully.");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    } else {
+        // Blink slow to indicate error
+        led_cmd_t error_blink = {
+            .mode = LED_MODE_BLINK,
+            .on_time_ms = 500,
+            .off_time_ms = 500
+        };
+        xQueueSend(led_queue, &error_blink, pdMS_TO_TICKS(10));
+
+        // Optional: remount SPIFFS so system continues working
+        esp_vfs_spiffs_register(&(esp_vfs_spiffs_conf_t){
+            .base_path = "/spiffs",
+            .partition_label = NULL,
+            .max_files = 5,
+            .format_if_mount_failed = false
+        });
+    }
+
+    return ret;
 }
 
 /* Start the Web Server */
@@ -383,7 +518,7 @@ void configure_gpios(void)
     gpio_isr_handler_add(BOOT_PIN, gpio_isr_handler, (void *)BOOT_PIN);
 
     // Dump gpio configuration to terminal
-    gpio_dump_io_configuration(stdout, SOC_GPIO_VALID_GPIO_MASK);
+    // gpio_dump_io_configuration(stdout, SOC_GPIO_VALID_GPIO_MASK);
 }
 
 void init_spiffs(void)
@@ -416,7 +551,9 @@ void app_main(void) {
     }
 
     configure_gpios(); // Initialize the LED pin
-
+    led_queue = xQueueCreate(1, sizeof(led_cmd_t));
+    xTaskCreate(led_task, "led_task", 2048, NULL, 5, &led_task_handle);
+    
     init_spiffs(); // mount spiffs
 
     esp_err_t ret = nvs_flash_init();
@@ -425,6 +562,7 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
