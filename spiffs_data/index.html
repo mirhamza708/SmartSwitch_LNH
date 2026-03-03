@@ -1,128 +1,293 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      body { 
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        color: white; 
-        display: flex; 
-        flex-direction: column; 
-        align-items: center; 
-        justify-content: center; 
-        height: 100vh; 
-        margin: 0; 
-      }
-      .card { 
-        background: rgba(255, 255, 255, 0.1); 
-        backdrop-filter: blur(10px); 
-        padding: 30px; 
-        border-radius: 20px; 
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); 
-        border: 1px solid rgba(255, 255, 255, 0.18); 
-        text-align: center; 
-      }
-      h1 { margin-bottom: 10px; font-weight: 300; }
-      .status { font-size: 0.9em; opacity: 0.8; margin-bottom: 25px; }
-      .btn { 
-        background: linear-gradient(to right, #3a7bd5, #00d2ff); 
-        border: none; 
-        color: white; 
-        padding: 15px 40px; 
-        font-size: 1.2em; 
-        border-radius: 50px; 
-        cursor: pointer; 
-        transition: 0.3s; 
-        box-shadow: 0 4px 15px rgba(0,0,0,0.2); 
-      }
-      .btn:active { transform: scale(0.95); }
-      .footer { margin-top: 20px; font-size: 0.7em; opacity: 0.5; }
-      #message { margin-top: 15px; font-size: 0.9em; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>SmartSwitch</h1>
-      <p class="status">Device: ESP32-LNH</p>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmartSwitch Pro</title>
 
-      <button class="btn" onclick="fetch('/toggle')">
-        POWER ON/OFF
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      margin: 0;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      padding: 30px;
+      border-radius: 20px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    h2 {
+      text-align: center;
+      font-weight: 300;
+      margin-bottom: 20px;
+    }
+
+    .btn {
+      background: linear-gradient(to right, #3a7bd5, #00d2ff);
+      border: none;
+      color: white;
+      padding: 12px;
+      border-radius: 50px;
+      cursor: pointer;
+      width: 100%;
+      margin: 8px 0;
+      font-size: 15px;
+      transition: 0.3s;
+    }
+
+    .btn:active {
+      transform: scale(0.95);
+    }
+
+    .btn-alt {
+      background: linear-gradient(to right, #e94560, #ff6b81);
+    }
+
+    .box {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 15px;
+      border-radius: 12px;
+      margin-top: 15px;
+    }
+
+    input, select {
+      padding: 6px;
+      margin: 5px 0;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+    }
+
+    input[type="number"] {
+      width: 70px;
+      text-align: center;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .day-btn {
+      display: inline-block;
+      width: 30px;
+      height: 30px;
+      line-height: 30px;
+      text-align: center;
+      background: #333;
+      border-radius: 50%;
+      margin: 2px;
+      cursor: pointer;
+      font-size: 13px;
+      user-select: none;
+    }
+
+    .day-btn.active {
+      background: #ff6b81;
+      font-weight: bold;
+    }
+
+    #message {
+      margin-top: 10px;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .footer {
+      margin-top: 15px;
+      font-size: 0.75em;
+      opacity: 0.7;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h2>SmartSwitch Pro</h2>
+
+    <!-- Manual Toggle -->
+    <button class="btn" onclick="fetch('/toggle')">
+      POWER ON / OFF
+    </button>
+
+    <!-- Clock Sync -->
+    <div class="box" style="text-align:center;">
+      <label style="font-size:13px;color:#ccc;">Device Time</label><br>
+      <input type="time" id="curTime">
+      <button class="btn btn-alt" style="padding:6px;font-size:13px;" onclick="syncClock()">
+        Sync to Phone
       </button>
+    </div>
 
-      <br><br>
+    <!-- Scheduler -->
+    <div class="box">
+      <div style="font-weight:bold;text-align:center;margin-bottom:10px;">
+        Automation
+      </div>
 
-      <!-- OTA Upload -->
+      <div class="row">
+        <span>Action:</span>
+        <select id="schAction">
+          <option value="1">ON</option>
+          <option value="0">OFF</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <span>At Time:</span>
+        <input type="time" id="schTime">
+      </div>
+
+      <div class="row">
+        <span>Duration:</span>
+        <div>
+          <input type="number" id="schDur"> mins
+        </div>
+      </div>
+
+      <div style="font-size:11px;color:#ccc;text-align:right;">
+        (0 = stay)
+      </div>
+
+      <div style="margin-top:10px;">Repeat On:</div>
+
+      <div style="text-align:center;">
+        <span class="day-btn" data-v="1">S</span>
+        <span class="day-btn" data-v="2">M</span>
+        <span class="day-btn" data-v="4">T</span>
+        <span class="day-btn" data-v="8">W</span>
+        <span class="day-btn" data-v="16">T</span>
+        <span class="day-btn" data-v="32">F</span>
+        <span class="day-btn" data-v="64">S</span>
+      </div>
+
+      <button class="btn btn-alt" onclick="setSched()">
+        Save Schedule
+      </button>
+    </div>
+
+    <!-- OTA Section -->
+    <div class="box">
+      <div style="font-weight:bold;text-align:center;margin-bottom:10px;">
+        OTA Update
+      </div>
+
       <input type="file" id="fwfile" accept=".bin">
-      <br><br>
       <button class="btn" onclick="uploadFirmware()">
         Update Firmware
       </button>
-      <br><br>
+
       <input type="file" id="spiffsfile" accept=".bin">
-      <br><br>
       <button class="btn" onclick="uploadSPIFFS()">
         Update SPIFFS
       </button>
-      <div id="message"></div>
 
-      <div class="footer">Connected via Local Access Point</div>
+      <div id="message"></div>
     </div>
 
-    <script>
-      function uploadFirmware() {
-        const fileInput = document.getElementById("fwfile");
-        const message = document.getElementById("message");
+    <div class="footer">
+      Connected via Local Access Point
+    </div>
+  </div>
 
-        if (!fileInput.files.length) {
-          message.innerHTML = "Please select a firmware file.";
-          return;
-        }
+  <script>
+    window.onload = function () {
+      let now = new Date();
+      document.getElementById("curTime").value =
+        now.getHours().toString().padStart(2, "0") + ":" +
+        now.getMinutes().toString().padStart(2, "0");
 
-        const file = fileInput.files[0];
+      document.querySelectorAll(".day-btn").forEach(btn => {
+        btn.onclick = function () {
+          this.classList.toggle("active");
+        };
+      });
+    };
 
-        message.innerHTML = "Uploading firmware...";
+    function syncClock() {
+      let t = document.getElementById("curTime").value;
+      if (!t) return;
 
-        fetch("/update", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/octet-stream"
-          },
-          body: file
-        })
-        .then(response => response.text())
-        .then(data => {
-          message.innerHTML = data;
-        })
-        .catch(error => {
-          message.innerHTML = "Upload failed!";
-        });
+      let parts = t.split(":");
+      fetch("/set_time?h=" + parts[0] + "&m=" + parts[1])
+        .then(() => alert("Clock Synced!"));
+    }
+
+    function setSched() {
+      let t = document.getElementById("schTime").value;
+      if (!t) {
+        alert("Select time!");
+        return;
       }
 
-      function uploadSPIFFS() {
-        const fileInput = document.getElementById("spiffsfile");
-        const message = document.getElementById("message");
+      let action = document.getElementById("schAction").value;
+      let dur = document.getElementById("schDur").value || 0;
+      let mask = 0;
 
-        if (!fileInput.files.length) {
-          message.innerHTML = "Select SPIFFS file.";
-          return;
-        }
+      document.querySelectorAll(".day-btn.active").forEach(btn => {
+        mask |= parseInt(btn.getAttribute("data-v"));
+      });
 
-        const file = fileInput.files[0];
+      let parts = t.split(":");
 
-        message.innerHTML = "Uploading SPIFFS...";
+      fetch(`/schedule?h=${parts[0]}&m=${parts[1]}&a=${action}&dur=${dur}&d=${mask}`)
+        .then(() => alert("Schedule Saved!"));
+    }
 
-        fetch("/update_spiffs", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/octet-stream"
-          },
-          body: file
-        })
-        .then(response => response.text())
-        .then(data => message.innerHTML = data)
-        .catch(err => message.innerHTML = "SPIFFS upload failed");
+    function uploadFirmware() {
+      const file = document.getElementById("fwfile").files[0];
+      const message = document.getElementById("message");
+
+      if (!file) {
+        message.innerHTML = "Select firmware file.";
+        return;
       }
-    </script>
-  </body>
+
+      message.innerHTML = "Uploading firmware...";
+
+      fetch("/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file
+      })
+      .then(response => response.text())
+      .then(data => message.innerHTML = data)
+      .catch(() => message.innerHTML = "Upload failed!");
+    }
+
+    function uploadSPIFFS() {
+      const file = document.getElementById("spiffsfile").files[0];
+      const message = document.getElementById("message");
+
+      if (!file) {
+        message.innerHTML = "Select SPIFFS file.";
+        return;
+      }
+
+      message.innerHTML = "Uploading SPIFFS...";
+
+      fetch("/update_spiffs", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file
+      })
+      .then(response => response.text())
+      .then(data => message.innerHTML = data)
+      .catch(() => message.innerHTML = "SPIFFS upload failed");
+    }
+  </script>
+</body>
 </html>

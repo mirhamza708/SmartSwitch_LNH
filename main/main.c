@@ -82,6 +82,7 @@ static int s_retry_num = 0;
 static EventGroupHandle_t s_wifi_event_group;
 
 static TaskHandle_t led_task_handle = NULL;
+static TaskHandle_t schedule_task_handle = NULL;
 static QueueHandle_t led_queue;
 
 typedef enum {
@@ -95,6 +96,24 @@ typedef struct {
     uint32_t on_time_ms;
     uint32_t off_time_ms;
 } led_cmd_t;
+
+/* --- Scheduling Globals --- */
+static bool time_is_set = false;
+static bool is_scheduled = false;
+static int sched_hour = -1;
+static int sched_minute = -1;
+static int sched_action = 0; 
+static int sched_duration = 0;      // In minutes
+static uint8_t sched_days_mask = 0; // Bitmask for days (1=Sun, 2=Mon... 64=Sat). 0 = Run Once
+
+// Prevent re-triggering multiple times in the same minute
+static int last_trigger_day = -1;
+static int last_trigger_min = -1;
+
+// Variables to track the "Turn Off After Duration" state
+static bool duration_active = false;
+static time_t duration_end_time = 0;
+static int duration_revert_action = 0;
 
 esp_err_t get_handler(httpd_req_t *req)
 {
@@ -124,6 +143,113 @@ esp_err_t toggle_handler(httpd_req_t *req) {
     ESP_LOGI("SERVER", "LED Toggled to %d", led_state);
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
+}
+
+esp_err_t set_time_handler(httpd_req_t *req) {
+    char buf[50];
+    char h[5], m[5];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        if (httpd_query_key_value(buf, "h", h, sizeof(h)) == ESP_OK &&
+            httpd_query_key_value(buf, "m", m, sizeof(m)) == ESP_OK) {
+            struct tm tm = { .tm_hour = atoi(h), .tm_min = atoi(m), .tm_year = 126, .tm_mon = 0, .tm_mday = 1 };
+            time_t t = mktime(&tm);
+            struct timeval now = { .tv_sec = t };
+            settimeofday(&now, NULL);
+            time_is_set = true;
+            ESP_LOGI("TIME", "Manual sync: %02d:%02d", tm.tm_hour, tm.tm_min);
+        }
+    }
+    httpd_resp_send(req, "Time Set", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+esp_err_t schedule_handler(httpd_req_t *req) {
+    char buf[100];
+    char h[5], m[5], a[5], dur[10], d[5];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        if (httpd_query_key_value(buf, "h", h, sizeof(h)) == ESP_OK &&
+            httpd_query_key_value(buf, "m", m, sizeof(m)) == ESP_OK &&
+            httpd_query_key_value(buf, "a", a, sizeof(a)) == ESP_OK &&
+            httpd_query_key_value(buf, "dur", dur, sizeof(dur)) == ESP_OK &&
+            httpd_query_key_value(buf, "d", d, sizeof(d)) == ESP_OK) {
+            
+            sched_hour = atoi(h);
+            sched_minute = atoi(m);
+            sched_action = atoi(a);
+            sched_duration = atoi(dur);
+            sched_days_mask = atoi(d);
+            
+            is_scheduled = true;
+            last_trigger_day = -1; // Reset anti-spam flags
+            last_trigger_min = -1;
+            duration_active = false; // Cancel any ongoing duration timers
+
+            ESP_LOGI("SCHED", "Task set: %02d:%02d Act:%d Dur:%d mins DaysMask:%d", 
+                     sched_hour, sched_minute, sched_action, sched_duration, sched_days_mask);
+        }
+    }
+    httpd_resp_send(req, "Scheduled", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// --- BACKGROUND TASK ---
+void schedule_monitor_task(void *pv) {
+    while(1) {
+        if (time_is_set) {
+            time_t now;
+            struct tm ti;
+            time(&now);
+            localtime_r(&now, &ti);
+
+            // 1. Check if a duration timer has expired
+            if (duration_active && now >= duration_end_time) {
+                gpio_set_level(STATUS_LED_PIN, duration_revert_action);
+                duration_active = false; // Turn off the timer flag
+                ESP_LOGI("TASK", "Duration Ended! Reverting state to: %d", duration_revert_action);
+            }
+
+            // 2. Check if it's time to trigger the main schedule
+            if (is_scheduled) {
+                bool day_match = false;
+                
+                // If mask is 0, user didn't pick any days. Treat it as a "Run Once" today/tomorrow.
+                if (sched_days_mask == 0) {
+                    day_match = true; 
+                } else {
+                    // Check if today's bit is set in the mask (ti.tm_wday: 0=Sun, 1=Mon, etc)
+                    day_match = (sched_days_mask & (1 << ti.tm_wday)) != 0;
+                }
+
+                if (day_match && ti.tm_hour == sched_hour && ti.tm_min == sched_minute) {
+                    // Prevent triggering 60 times in the same minute
+                    if (last_trigger_day != ti.tm_yday || last_trigger_min != ti.tm_min) {
+                        
+                        // Execute Action
+                        gpio_set_level(STATUS_LED_PIN, sched_action);
+                        ESP_LOGI("TASK", "Schedule Fired! State: %d", sched_action);
+
+                        // If a duration is set, start the countdown clock
+                        if (sched_duration > 0) {
+                            duration_end_time = now + (sched_duration * 60); // mins to seconds
+                            duration_revert_action = !sched_action; // Opposite action
+                            duration_active = true;
+                            ESP_LOGI("TASK", "Duration set! Will revert in %d mins", sched_duration);
+                        }
+
+                        // Mark this minute as triggered
+                        last_trigger_day = ti.tm_yday;
+                        last_trigger_min = ti.tm_min;
+
+                        // If it's a "Run Once" schedule (no days selected), turn it off now
+                        if (sched_days_mask == 0) {
+                            is_scheduled = false;
+                        }
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Check every 1 second to keep duration timing accurate
+    }
 }
 
 void led_task(void *arg)
@@ -369,11 +495,15 @@ void start_webserver(void) {
         httpd_uri_t uri_toggle = {.uri = "/toggle", .method = HTTP_GET, .handler = toggle_handler};
         httpd_uri_t ota_uri = {.uri = "/update", .method    = HTTP_POST, .handler   = ota_post_handler, .user_ctx  = NULL};
         httpd_uri_t spiffs_uri = {.uri = "/update_spiffs", .method = HTTP_POST, .handler = spiffs_post_handler, .user_ctx  = NULL};
-
+        httpd_uri_t uri_tim = {.uri = "/set_time", .method = HTTP_GET, .handler = set_time_handler};
+        httpd_uri_t uri_sch = {.uri = "/schedule", .method = HTTP_GET, .handler = schedule_handler};
+        
         httpd_register_uri_handler(server, &spiffs_uri);
         httpd_register_uri_handler(server, &ota_uri);
         httpd_register_uri_handler(server, &uri_root);
         httpd_register_uri_handler(server, &uri_toggle);
+        httpd_register_uri_handler(server, &uri_tim);
+        httpd_register_uri_handler(server, &uri_sch);
         ESP_LOGI("SERVER", "Web server started!");
     }
 }
@@ -553,6 +683,7 @@ void app_main(void) {
     configure_gpios(); // Initialize the LED pin
     led_queue = xQueueCreate(1, sizeof(led_cmd_t));
     xTaskCreate(led_task, "led_task", 2048, NULL, 5, &led_task_handle);
+    xTaskCreate(schedule_monitor_task, "schedule_task", 2048, NULL, 6, &schedule_task_handle);
     
     init_spiffs(); // mount spiffs
 
