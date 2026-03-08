@@ -13,6 +13,7 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "esp_http_server.h" // Added for the Web Server
+#include "nvs.h" // Added for NVS storage of WiFi credentials
 
 #if IP_NAPT
 #include "lwip/lwip_napt.h"
@@ -96,6 +97,20 @@ typedef struct {
     uint32_t on_time_ms;
     uint32_t off_time_ms;
 } led_cmd_t;
+
+
+//wifi section
+ #define STORAGE_NAMESPACE "storage"
+
+void save_wifi_credentials(const char* ssid, const char* pass) {
+    nvs_handle_t my_handle;
+    if (nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &my_handle) == ESP_OK) {
+        nvs_set_str(my_handle, "ssid", ssid);
+        nvs_set_str(my_handle, "pass", pass);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+    }
+}
 
 /* --- Scheduling Globals --- */
 static bool time_is_set = false;
@@ -192,6 +207,46 @@ esp_err_t schedule_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// HTTP handler
+esp_err_t config_wifi_handler(httpd_req_t *req) {
+    char buf[128];
+    char ssid[32], pass[64];
+
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        if (httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid)) == ESP_OK &&
+            httpd_query_key_value(buf, "pass", pass, sizeof(pass)) == ESP_OK) {
+            
+            ESP_LOGI("WIFI", "New Creds: %s", ssid);
+            save_wifi_credentials(ssid, pass);
+
+            wifi_config_t wifi_config = {
+                .sta = { .threshold.authmode = WIFI_AUTH_WPA2_PSK },
+            };
+            strncpy((char*)wifi_config.sta.ssid, ssid, 32);
+            strncpy((char*)wifi_config.sta.password, pass, 64);
+
+            esp_wifi_disconnect();
+            esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+            esp_wifi_connect();
+
+            httpd_resp_send(req, "Connecting... checking status.", HTTPD_RESP_USE_STRLEN);
+            return ESP_OK;
+        }
+    }
+    httpd_resp_send_404(req);
+    return ESP_FAIL;
+}
+
+esp_err_t get_ip_handler(httpd_req_t *req) {
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_get_ip_info(netif, &ip_info);
+    
+    char ip_str[16];
+    esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+    httpd_resp_send(req, ip_str, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
 // --- BACKGROUND TASK ---
 void schedule_monitor_task(void *pv) {
     while(1) {
@@ -490,21 +545,35 @@ void start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
 
+    // We must start the server FIRST so that 'server' is no longer NULL
     if (httpd_start(&server, &config) == ESP_OK) {
+        // Now define all URIs
         httpd_uri_t uri_root = {.uri = "/", .method = HTTP_GET, .handler = get_handler};
         httpd_uri_t uri_toggle = {.uri = "/toggle", .method = HTTP_GET, .handler = toggle_handler};
-        httpd_uri_t ota_uri = {.uri = "/update", .method    = HTTP_POST, .handler   = ota_post_handler, .user_ctx  = NULL};
-        httpd_uri_t spiffs_uri = {.uri = "/update_spiffs", .method = HTTP_POST, .handler = spiffs_post_handler, .user_ctx  = NULL};
+        httpd_uri_t ota_uri = {.uri = "/update", .method = HTTP_POST, .handler = ota_post_handler, .user_ctx = NULL};
+        httpd_uri_t spiffs_uri = {.uri = "/update_spiffs", .method = HTTP_POST, .handler = spiffs_post_handler, .user_ctx = NULL};
         httpd_uri_t uri_tim = {.uri = "/set_time", .method = HTTP_GET, .handler = set_time_handler};
         httpd_uri_t uri_sch = {.uri = "/schedule", .method = HTTP_GET, .handler = schedule_handler};
         
-        httpd_register_uri_handler(server, &spiffs_uri);
-        httpd_register_uri_handler(server, &ota_uri);
+        // New Wi-Fi Config URIs
+        httpd_uri_t uri_wifi = {.uri = "/config_wifi", .method = HTTP_GET, .handler = config_wifi_handler};
+        httpd_uri_t uri_ip = {.uri = "/get_ip", .method = HTTP_GET, .handler = get_ip_handler};
+        
+        // Register everything to the valid 'server' handle
         httpd_register_uri_handler(server, &uri_root);
         httpd_register_uri_handler(server, &uri_toggle);
+        httpd_register_uri_handler(server, &ota_uri);
+        httpd_register_uri_handler(server, &spiffs_uri);
         httpd_register_uri_handler(server, &uri_tim);
         httpd_register_uri_handler(server, &uri_sch);
-        ESP_LOGI("SERVER", "Web server started!");
+        
+        // Register the new ones
+        httpd_register_uri_handler(server, &uri_wifi);
+        httpd_register_uri_handler(server, &uri_ip);
+
+        ESP_LOGI("SERVER", "Web server started successfully with all handlers!");
+    } else {
+        ESP_LOGE("SERVER", "Failed to start web server!");
     }
 }
 
@@ -562,30 +631,24 @@ esp_netif_t *wifi_init_softap(void)
 }
 
 /* Initialize wifi station */
-esp_netif_t *wifi_init_sta(void)
-{
+esp_netif_t *wifi_init_sta(void) {
     esp_netif_t *esp_netif_sta = esp_netif_create_default_wifi_sta();
+    wifi_config_t wifi_sta_config = { .sta = { .threshold.authmode = WIFI_AUTH_WPA2_PSK } };
 
-    wifi_config_t wifi_sta_config = {
-        .sta = {
-            .ssid = EXAMPLE_ESP_WIFI_STA_SSID,
-            .password = EXAMPLE_ESP_WIFI_STA_PASSWD,
-            .scan_method = WIFI_ALL_CHANNEL_SCAN,
-            .failure_retry_cnt = EXAMPLE_ESP_MAXIMUM_RETRY,
-            /* Authmode threshold resets to WPA2 as default if password matches WPA2 standards (password len => 8).
-             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-            * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-             */
-            .threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD,
-            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
-        },
-    };
+    nvs_handle_t my_handle;
+    size_t ssid_len = 32, pass_len = 64;
+    // Load from NVS
+    if (nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
+        nvs_get_str(my_handle, "ssid", (char*)wifi_sta_config.sta.ssid, &ssid_len);
+        nvs_get_str(my_handle, "pass", (char*)wifi_sta_config.sta.password, &pass_len);
+        nvs_close(my_handle);
+    } else {
+        // Use your CONFIG defaults from Kconfig if nothing is saved yet
+        strncpy((char*)wifi_sta_config.sta.ssid, EXAMPLE_ESP_WIFI_STA_SSID, 32);
+        strncpy((char*)wifi_sta_config.sta.password, EXAMPLE_ESP_WIFI_STA_PASSWD, 64);
+    }
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config) );
-
-    ESP_LOGI(TAG_STA, "wifi_init_sta finished.");
-
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
     return esp_netif_sta;
 }
 

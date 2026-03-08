@@ -105,18 +105,37 @@
       text-align: center;
     }
 
+    /*
     .footer {
       margin-top: 15px;
       font-size: 0.75em;
       opacity: 0.7;
       text-align: center;
     }
+      */
+    .footer {
+    margin-top: 30px;
+    padding: 20px;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.7);
+    width: 100%;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    letter-spacing: 0.5px;
+    line-height: 1.6;
+}
+
+  .footer b {
+      color: #00d2ff; /* accent blue for the corp name */
+      font-size: 15px;
+      text-transform: uppercase;
+  }
   </style>
 </head>
 
 <body>
   <div class="card">
-    <h2>SmartSwitch Pro</h2>
+    <h2>Smart Switch</h2>
 
     <!-- Manual Toggle -->
     <button class="btn" onclick="fetch('/toggle')">
@@ -203,91 +222,138 @@
     </div>
   </div>
 
-  <script>
-    window.onload = function () {
-      let now = new Date();
-      document.getElementById("curTime").value =
-        now.getHours().toString().padStart(2, "0") + ":" +
-        now.getMinutes().toString().padStart(2, "0");
+  <!-- wifi section -->
+   <div class="box">
+  <div style="font-weight:bold;text-align:center;margin-bottom:10px;">
+    Wi-Fi Settings
+  </div>
+  <div class="row">
+    <span>SSID:</span>
+    <input type="text" id="wifi_ssid" placeholder="Network Name">
+  </div>
+  <div class="row">
+    <span>Pass:</span>
+    <input type="password" id="wifi_pass" placeholder="Password">
+  </div>
+  <button class="btn" onclick="saveWifi()">Connect & Save</button>
+  
+  <div id="wifi_status" style="margin-top:10px; font-size:12px; text-align:center; color:#00d2ff; word-break: break-all;">
+    Status: Not Connected
+  </div>
+</div>
 
-      document.querySelectorAll(".day-btn").forEach(btn => {
-        btn.onclick = function () {
-          this.classList.toggle("active");
-        };
-      });
-    };
+<div class="footer">
+    <b>LnH Corp.</b><br>
+    Made with <span style="color: #ff4d4d;">&#10084;</span> by Aftab Lodhi & Mir Hamza
+</div>
 
-    function syncClock() {
-      let t = document.getElementById("curTime").value;
-      if (!t) return;
+<script>
+  window.onload = function () {
+    // 1. Initialize Local Clock Input
+    let now = new Date();
+    document.getElementById("curTime").value =
+      now.getHours().toString().padStart(2, "0") + ":" +
+      now.getMinutes().toString().padStart(2, "0");
 
-      let parts = t.split(":");
-      fetch("/set_time?h=" + parts[0] + "&m=" + parts[1])
-        .then(() => alert("Clock Synced!"));
-    }
+    // 2. Initialize Day Selection Buttons
+    document.querySelectorAll(".day-btn").forEach(btn => {
+      btn.onclick = function () {
+        this.classList.toggle("active");
+      };
+    });
 
-    function setSched() {
-      let t = document.getElementById("schTime").value;
-      if (!t) {
-        alert("Select time!");
-        return;
-      }
+    // 3. NEW: Check connection status immediately on page load
+    checkCurrentStatus();
+  };
 
-      let action = document.getElementById("schAction").value;
-      let dur = document.getElementById("schDur").value || 0;
-      let mask = 0;
-
-      document.querySelectorAll(".day-btn.active").forEach(btn => {
-        mask |= parseInt(btn.getAttribute("data-v"));
-      });
-
-      let parts = t.split(":");
-
-      fetch(`/schedule?h=${parts[0]}&m=${parts[1]}&a=${action}&dur=${dur}&d=${mask}`)
-        .then(() => alert("Schedule Saved!"));
-    }
-
-    function uploadFirmware() {
-      const file = document.getElementById("fwfile").files[0];
-      const message = document.getElementById("message");
-
-      if (!file) {
-        message.innerHTML = "Select firmware file.";
-        return;
-      }
-
-      message.innerHTML = "Uploading firmware...";
-
-      fetch("/update", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: file
+  // Dedicated function to update the Wi-Fi card status
+  function checkCurrentStatus() {
+    let status = document.getElementById("wifi_status");
+    fetch('/get_ip')
+      .then(res => res.text())
+      .then(ip => {
+        if (ip !== "0.0.0.0" && ip.trim() !== "") {
+          status.innerHTML = `Connected! IP: <b style="color:#00ff00;">${ip}</b>`;
+        } else {
+          status.innerHTML = "Status: Not Connected";
+        }
       })
+      .catch(() => {
+        status.innerHTML = "Status: Offline (AP Mode)";
+      });
+  }
+
+  function syncClock() {
+    let t = document.getElementById("curTime").value;
+    if (!t) return;
+    let parts = t.split(":");
+    fetch("/set_time?h=" + parts[0] + "&m=" + parts[1])
+      .then(() => alert("Clock Synced!"));
+  }
+
+  function setSched() {
+    let t = document.getElementById("schTime").value;
+    if (!t) { alert("Select time!"); return; }
+    let action = document.getElementById("schAction").value;
+    let dur = document.getElementById("schDur").value || 0;
+    let mask = 0;
+    document.querySelectorAll(".day-btn.active").forEach(btn => {
+      mask |= parseInt(btn.getAttribute("data-v"));
+    });
+    let parts = t.split(":");
+    fetch(`/schedule?h=${parts[0]}&m=${parts[1]}&a=${action}&dur=${dur}&d=${mask}`)
+      .then(() => alert("Schedule Saved!"));
+  }
+
+  function uploadFirmware() {
+    const file = document.getElementById("fwfile").files[0];
+    const message = document.getElementById("message");
+    if (!file) { message.innerHTML = "Select firmware file."; return; }
+    message.innerHTML = "Uploading firmware...";
+    fetch("/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file
+    })
+    .then(response => response.text())
+    .then(data => message.innerHTML = data)
+    .catch(() => message.innerHTML = "Upload failed!");
+  }
+
+  function uploadSPIFFS() {
+    const file = document.getElementById("spiffsfile").files[0];
+    const message = document.getElementById("message");
+    if (!file) { message.innerHTML = "Select SPIFFS file."; return; }
+    message.innerHTML = "Uploading SPIFFS...";
+    fetch("/update_spiffs", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file
+    })
+    .then(response => response.text())
+    .then(data => message.innerHTML = data)
+    .catch(() => message.innerHTML = "SPIFFS upload failed");
+  }
+
+  function saveWifi() {
+    let ssid = document.getElementById("wifi_ssid").value;
+    let pass = document.getElementById("wifi_pass").value;
+    let status = document.getElementById("wifi_status");
+    if (!ssid) { alert("SSID is required!"); return; }
+    status.innerHTML = "Connecting... Please wait.";
+    fetch(`/config_wifi?ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}`)
       .then(response => response.text())
-      .then(data => message.innerHTML = data)
-      .catch(() => message.innerHTML = "Upload failed!");
+      .then(data => { status.innerHTML = data; })
+      .catch(() => { status.innerHTML = "Request failed. Check AP connection."; });
+  }
+
+  // Poll for IP address every 5 seconds ONLY if we are waiting for a connection
+  setInterval(() => {
+    let status = document.getElementById("wifi_status");
+    if (status.innerHTML.includes("Connecting") || status.innerHTML.includes("checking status")) {
+      checkCurrentStatus();
     }
-
-    function uploadSPIFFS() {
-      const file = document.getElementById("spiffsfile").files[0];
-      const message = document.getElementById("message");
-
-      if (!file) {
-        message.innerHTML = "Select SPIFFS file.";
-        return;
-      }
-
-      message.innerHTML = "Uploading SPIFFS...";
-
-      fetch("/update_spiffs", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: file
-      })
-      .then(response => response.text())
-      .then(data => message.innerHTML = data)
-      .catch(() => message.innerHTML = "SPIFFS upload failed");
-    }
-  </script>
+  }, 5000);
+</script>
 </body>
 </html>
